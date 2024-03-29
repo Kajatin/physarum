@@ -1,8 +1,6 @@
-use wgpu::{
-    Backends, Color, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor, Limits,
-    PowerPreference, Queue, RequestAdapterOptions, Surface, SurfaceConfiguration,
-};
-use wgpu::util::DeviceExt;
+use std::sync::Arc;
+
+use wgpu::{Backends, Instance, InstanceDescriptor, Surface, SurfaceConfiguration};
 use winit::{
     dpi::PhysicalSize,
     event::{Event, WindowEvent},
@@ -10,6 +8,12 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowBuilder},
 };
+
+mod agent;
+mod device;
+mod parameters;
+mod pipelines;
+mod resources;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -33,8 +37,8 @@ impl Vertex {
                     offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
-                }
-            ]
+                },
+            ],
         }
     }
 }
@@ -55,22 +59,33 @@ const VERTICES: &[Vertex] = &[
 ];
 
 struct State<'window> {
-    size: PhysicalSize<u32>,
+    params: parameters::Parameters,
     surface: Surface<'window>,
-    device: Device,
-    queue: Queue,
+    device: device::Device,
     config: SurfaceConfiguration,
-    clear_color: Color,
-    window: &'window Window,
-    render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    num_vertices: u32,
+    resources: resources::Resources,
+    pipelines: pipelines::Pipelines,
+    window: Arc<Window>,
+    gpu_mutex: Arc<std::sync::Mutex<()>>,
+    exiting: bool,
 }
 
 impl<'window> State<'window> {
-    // Creating some of the wgpu types requires async code
-    async fn new(window: &'window Window) -> State<'window> {
+    async fn new(window: Window) -> State<'window> {
         let size = window.inner_size();
+
+        let window = Arc::new(window);
+
+        let mut params = parameters::Parameters::builder()
+            .shader_parameters(
+                parameters::ShaderParameters::builder()
+                    .canvas_width(size.width)
+                    .canvas_height(size.height)
+                    .build(),
+            )
+            .build();
+
+        // params.shader_parameters.randomize();
 
         // Context for all other wgpu objects.
         let instance = Instance::new(InstanceDescriptor {
@@ -78,194 +93,189 @@ impl<'window> State<'window> {
             ..Default::default()
         });
 
-        let surface = instance.create_surface(window).unwrap();
+        let surface = instance.create_surface(Arc::clone(&window)).unwrap();
 
-        // Handle to the physical graphics and/or compute device.
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .unwrap();
+        let device = device::Device::new(&instance, Some(&surface)).await;
 
-        let (device, queue) = adapter
-            .request_device(
-                &DeviceDescriptor {
-                    label: None,
-                    required_features: Features::empty(),
-                    required_limits: Limits::default(),
-                },
-                None,
-            )
-            .await
-            .unwrap();
+        let config = configure_surface(&device, &surface, size);
 
-        let caps = surface.get_capabilities(&adapter);
+        let resources = resources::Resources::new(&device.device, &params);
 
-        let surface_format = caps
-            .formats
-            .iter()
-            .copied()
-            .filter(|f| f.is_srgb())
-            .next()
-            .unwrap_or(caps.formats[0]);
-
-        let config = SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: caps.present_modes[0],
-            desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-        };
-
-        surface.configure(&device, &config);
-
-        let clear_color = wgpu::Color::BLACK;
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent::REPLACE,
-                        alpha: wgpu::BlendComponent::REPLACE,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
-                // or Features::POLYGON_MODE_POINT
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            // If the pipeline will be used with a multiview render pass, this
-            // indicates how many array layers the attachments will have.
-            multiview: None,
-        });
-
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let num_vertices = VERTICES.len() as u32;
+        let pipelines = pipelines::Pipelines::new(&device.device, config.format, &resources);
 
         Self {
-            size,
+            params,
             surface,
             device,
-            queue,
             config,
-            clear_color,
+            resources,
+            pipelines,
             window,
-            render_pipeline,
-            vertex_buffer,
-            num_vertices,
+            gpu_mutex: Arc::new(std::sync::Mutex::new(())),
+            exiting: false,
         }
     }
 
-    pub fn window(&self) -> &Window {
-        &self.window
-    }
+    fn update(&self) {
+        let gpu_lock = self.gpu_mutex.lock().unwrap();
 
-    fn input(&mut self, event: &WindowEvent) -> bool {
-        match event {
-            WindowEvent::CursorMoved { position, .. } => {
-                self.clear_color = wgpu::Color {
-                    r: position.x as f64 / self.size.width as f64,
-                    g: position.y as f64 / self.size.height as f64,
-                    b: 1.0,
-                    a: 1.0,
-                };
-                true
-            }
-            _ => false,
+        // Start a new command encoder
+        let mut command_encoder =
+            self.device
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("command-encoder"),
+                });
+
+        // Diffuse and decay
+        {
+            let mut compute_pass =
+                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("diffuse-and-decay-cp"),
+                    timestamp_writes: None,
+                });
+
+            compute_pass.set_pipeline(&self.pipelines.diffuse_and_decay);
+            compute_pass.set_bind_group(0, &self.resources.shader_context.bind_group, &[]);
+            compute_pass.set_bind_group(1, &self.resources.data_layer.bind_group, &[]);
+            compute_pass.set_bind_group(2, &self.resources.trail_layer.bind_group, &[]);
+
+            compute_pass.dispatch_workgroups(
+                self.params.shader_parameters.canvas_width / 8,
+                self.params.shader_parameters.canvas_height / 8,
+                1,
+            );
         }
+
+        // Move agents and deposit
+        {
+            let mut compute_pass =
+                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("agent-sense-move-deposit-cp"),
+                    timestamp_writes: None,
+                });
+
+            compute_pass.set_pipeline(&self.pipelines.agent_sense_move_deposit);
+            compute_pass.set_bind_group(0, &self.resources.shader_context.bind_group, &[]);
+            compute_pass.set_bind_group(1, &self.resources.data_layer.bind_group, &[]);
+            compute_pass.set_bind_group(2, &self.resources.trail_layer.bind_group, &[]);
+
+            // Lay agents out in x and y so they can be mapped to shader workgroups
+            let number_of_active_agents = self.params.shader_parameters.number_of_active_agents;
+
+            // Must match what is in the shader code
+            const WORKGROUP_SIZE_X: u32 = 8;
+            const WORKGROUP_SIZE_Y: u32 = 8;
+            const WORKGROUP_SIZE_Z: u32 = 1;
+
+            let threads_per_workgroup = WORKGROUP_SIZE_X * WORKGROUP_SIZE_Y * WORKGROUP_SIZE_Z;
+
+            // Hacked integer division: number_of_active_agents / threads_per_workgroup but hacked so it rounds up
+            let workgroups_needed =
+                (number_of_active_agents + (threads_per_workgroup - 1)) / threads_per_workgroup;
+
+            const NUMBER_OF_WORKGROUPS_X: u32 = 32;
+            // Hacked integer division: workgroups_needed / 32 but hacked so it rounds up
+            let number_of_workgroups_y = (workgroups_needed + 31) / 32;
+            let number_of_workgroups_z = 1;
+
+            compute_pass.dispatch_workgroups(
+                NUMBER_OF_WORKGROUPS_X,
+                number_of_workgroups_y,
+                number_of_workgroups_z,
+            );
+        }
+
+        let command_buffer = command_encoder.finish();
+        self.device.queue.submit(Some(command_buffer));
+
+        drop(gpu_lock);
     }
 
-    fn update(&mut self) {}
+    fn render(&self) -> Result<(), wgpu::SurfaceError> {
+        let surface_texture = self.surface.get_current_texture()?;
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
-
-        let view = output
+        let texture_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
+        let gpu_lock = self.gpu_mutex.lock().unwrap();
+
+        let mut command_encoder =
+            self.device
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("render-command-encoder"),
+                });
 
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
+            let mut render_pass = command_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("render-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &texture_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,
-                occlusion_query_set: None,
                 timestamp_writes: None,
+                occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.draw(0..self.num_vertices, 0..1);
+            render_pass.set_pipeline(&self.pipelines.render_pipeline);
+            render_pass.set_bind_group(0, &self.resources.shader_context.bind_group, &[]);
+            render_pass.set_bind_group(1, &self.resources.data_layer.bind_group, &[]);
+            render_pass.set_bind_group(2, &self.resources.trail_layer.bind_group, &[]);
+            render_pass.draw(0..6, 0..1);
         }
 
-        // submit will accept anything that implements IntoIter
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        self.device
+            .queue
+            .submit(std::iter::once(command_encoder.finish()));
+
+        drop(gpu_lock);
+
+        surface_texture.present();
 
         Ok(())
     }
+
+    fn exit(&mut self) {
+        self.exiting = true;
+    }
+}
+
+fn configure_surface(
+    device: &device::Device,
+    surface: &Surface,
+    size: PhysicalSize<u32>,
+) -> SurfaceConfiguration {
+    let caps = surface.get_capabilities(&device.adapter);
+
+    let surface_format = caps
+        .formats
+        .iter()
+        .copied()
+        .filter(|f| f.is_srgb())
+        .next()
+        .unwrap_or(caps.formats[0]);
+
+    let config = SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: surface_format,
+        width: size.width,
+        height: size.height,
+        present_mode: caps.present_modes[0],
+        desired_maximum_frame_latency: 2,
+        alpha_mode: caps.alpha_modes[0],
+        view_formats: vec![],
+    };
+
+    surface.configure(&device.device, &config);
+
+    config
 }
 
 pub async fn run() {
@@ -278,57 +288,83 @@ pub async fn run() {
 
     let window = window_builder.build(&event_loop).unwrap();
 
-    let mut state = State::new(&window).await;
+    let state = Arc::new(State::new(window).await);
 
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // Spawn thread to drive the simulation forward by dispatching GPU commands at e.g. 60 FPS
+    let state_tick = Arc::clone(&state);
+    let ticker = tokio::spawn(async move {
+        loop {
+            if state_tick.exiting {
+                break;
+            }
+
+            state_tick.update();
+
+            tokio::time::sleep(std::time::Duration::from_nanos(
+                1_000_000_000 / state_tick.params.target_ticks_per_second as u64,
+            ))
+            .await;
+        }
+    });
 
     event_loop
         .run(move |event, elwt| {
             match event {
+                Event::NewEvents(cause) => match cause {
+                    winit::event::StartCause::ResumeTimeReached { .. } => {
+                        state.window.request_redraw();
+                    }
+                    _ => {}
+                },
                 Event::WindowEvent { window_id, event } => {
                     // println!("Window event: {:?}, {:?}", window_id, event);
 
-                    if window_id == state.window().id() {
-                        if !state.input(&event) {
-                            match event {
-                                WindowEvent::CloseRequested => {
-                                    elwt.exit();
-                                }
-                                WindowEvent::RedrawRequested => {
-                                    state.update();
-
-                                    match state.render() {
-                                        Ok(_) => {}
-                                        Err(wgpu::SurfaceError::Lost) => {
-                                            state.surface.configure(&state.device, &state.config);
-                                        }
-                                        Err(wgpu::SurfaceError::OutOfMemory) => {
-                                            eprintln!("Out of memory");
-                                            elwt.exit();
-                                        }
-                                        Err(e) => eprintln!("{:?}", e),
-                                    }
-                                }
-                                WindowEvent::KeyboardInput { event, .. } => {
-                                    if event.state == winit::event::ElementState::Pressed {
-                                        match event.physical_key {
-                                            PhysicalKey::Code(code) => match code {
-                                                KeyCode::Escape => elwt.exit(),
-                                                _ => (),
-                                            },
-                                            _ => (),
-                                        }
-                                    }
-                                }
-                                _ => (),
+                    if window_id == state.window.id() {
+                        match event {
+                            WindowEvent::CloseRequested => {
+                                elwt.exit();
                             }
+                            WindowEvent::RedrawRequested => {
+                                let time_per_frame = std::time::Duration::from_micros(
+                                    1_000_000 / state.params.target_ticks_per_second as u64,
+                                );
+                                let next_frame = std::time::Instant::now() + time_per_frame;
+                                elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
+
+                                match state.render() {
+                                    Ok(_) => {}
+                                    Err(wgpu::SurfaceError::Lost) => {
+                                        state
+                                            .surface
+                                            .configure(&state.device.device, &state.config);
+                                    }
+                                    Err(wgpu::SurfaceError::OutOfMemory) => {
+                                        eprintln!("Out of memory");
+                                        elwt.exit();
+                                    }
+                                    Err(e) => eprintln!("{:?}", e),
+                                }
+                            }
+                            WindowEvent::KeyboardInput { event, .. } => {
+                                if event.state == winit::event::ElementState::Pressed {
+                                    match event.physical_key {
+                                        PhysicalKey::Code(code) => match code {
+                                            KeyCode::Escape => elwt.exit(),
+                                            KeyCode::KeyR => {
+                                                // state.params.shader_parameters.randomize();
+                                            }
+                                            _ => (),
+                                        },
+                                        _ => (),
+                                    }
+                                }
+                            }
+                            _ => (),
                         }
                     }
                 }
-                Event::AboutToWait => {
-                    state.window().request_redraw();
-                }
                 Event::LoopExiting => {
+                    // state.exit();
                     println!("The event loop is exiting; stopping");
                 }
                 _ => (),
@@ -337,4 +373,6 @@ pub async fn run() {
         .unwrap_or_else(|e| {
             eprintln!("An error occurred: {}", e);
         });
+
+    ticker.await.unwrap();
 }
