@@ -53,11 +53,14 @@ pub struct ShaderParameters {
     #[builder(default = 1)]
     pub bool_enable_render_trail_map: u32,
 
+    #[builder(default = 0)]
+    pub bool_enable_high_density_dispersion: u32,
+
     pub canvas_width: u32,
 
     pub canvas_height: u32,
 
-    #[builder(default = 500_000)]
+    #[builder(default = 10_000_000)]
     pub number_of_active_agents: u32,
 
     #[builder(default = 1.0)]
@@ -67,7 +70,7 @@ pub struct ShaderParameters {
     pub decay_strength: f32,
 
     /// Angle for left and right sensors.
-    #[builder(default = 54.2)]
+    #[builder(default = 24.2)]
     pub sensor_angle_degrees: f32,
 
     /// Max angle to turn when left or right sensor dictates turn direction.
@@ -89,7 +92,7 @@ pub struct ShaderParameters {
     #[builder(default = 0.03)]
     pub deposit_strength: f32,
 
-    #[builder(default = 13.8)]
+    #[builder(default = 33.8)]
     pub sensor_distance: f32,
 }
 
@@ -112,7 +115,7 @@ impl ShaderParameters {
 #[derive(Debug, Clone, Copy, SmartDefault, PartialEq)]
 pub struct InitialConditions {
     /// Radius of circle in which agents are initially distributed
-    #[default = 200.0]
+    #[default = 500.0]
     pub initial_circle_radius: f32,
 
     /// Initial agent direction
@@ -121,8 +124,8 @@ pub struct InitialConditions {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InitialHeading {
-    #[default]
     Inward,
     Outward,
+    #[default]
     Random,
 }

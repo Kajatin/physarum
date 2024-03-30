@@ -10,6 +10,7 @@ struct ShaderParameters {
     bool_enable_decay: u32,
     bool_enable_diffuse: u32,
     bool_enable_render_trail_map: u32,
+    bool_enable_high_density_dispersion: u32,
     canvas_width: u32,
     canvas_height: u32,
     number_of_active_agents: u32,
@@ -154,12 +155,14 @@ fn agent_sense_move_deposit(
 
     // TWIST: If the deposit density is too great (too many agents in the same spot)
     // TODO: create toggle
-    if deposit_strength_at(agent.position) >= ctx.high_density_threshold {
-        // Add speed proportional to the speed boost param and the deposit strength at the current position
-        speed = speed + ctx.high_density_speed_boost * deposit_strength_at(agent.position);
+    if bool(ctx.bool_enable_high_density_dispersion) {
+        if deposit_strength_at(agent.position) >= ctx.high_density_threshold {
+            // Add speed proportional to the speed boost param and the deposit strength at the current position
+            speed = speed + ctx.high_density_speed_boost * deposit_strength_at(agent.position);
 
-        // Turn agent randomly
-        agent.velocity = rotate_cw(random_float_in_range(-ctx.max_rand_turn_angle_degrees, ctx.max_rand_turn_angle_degrees, seed), agent.velocity);
+            // Turn agent randomly
+            agent.velocity = rotate_cw(random_float_in_range(-ctx.max_rand_turn_angle_degrees, ctx.max_rand_turn_angle_degrees, seed), agent.velocity);
+        }
     }
 
     // BOUNCE: Bounce on window borders
@@ -322,11 +325,24 @@ fn rand_u32(seed: u32) -> u32 {
 
 fn gradient(t: f32) -> vec3<f32> {
     let black = vec3(0.0, 0.0, 0.0);
-    let g1 = vec3(40.0, 54.0, 24.0) / vec3(255.0);
-    let g2 = vec3(96.0, 108.0, 56.0) / vec3(255.0);
-    let g3 = vec3(188.0, 108.0, 37.0) / vec3(255.0);
-    let g4 = vec3(221.0, 161.0, 94.0) / vec3(255.0);
-    let g5 = vec3(254.0, 250.0, 224.0) / vec3(255.0);
+    // yellow
+    // let g1 = vec3(46.0, 34.0, 3.0) / vec3(255.0);
+    // let g2 = vec3(84.0, 65.0, 17.0) / vec3(255.0);
+    // let g3 = vec3(140.0, 112.0, 41.0) / vec3(255.0);
+    // let g4 = vec3(194.0, 161.0, 79.0) / vec3(255.0);
+    // let g5 = vec3(237.0, 209.0, 140.0) / vec3(255.0);
+    // green
+    // let g1 = vec3(40.0, 54.0, 24.0) / vec3(255.0);
+    // let g2 = vec3(96.0, 108.0, 56.0) / vec3(255.0);
+    // let g3 = vec3(188.0, 108.0, 37.0) / vec3(255.0);
+    // let g4 = vec3(221.0, 161.0, 94.0) / vec3(255.0);
+    // let g5 = vec3(254.0, 250.0, 224.0) / vec3(255.0);
+    //
+    let g1 = vec3(246, 255, 0) / vec3(255.0);
+    let g2 = vec3(200, 255, 0) / vec3(255.0);
+    let g3 = vec3(149, 255, 0) / vec3(255.0);
+    let g4 = vec3(77, 255, 0) / vec3(255.0);
+    let g5 = vec3(0, 221, 255) / vec3(255.0);
 
     if t > 1.0 {
         return black;

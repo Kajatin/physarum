@@ -67,7 +67,6 @@ struct State<'window> {
     pipelines: pipelines::Pipelines,
     window: Arc<Window>,
     gpu_mutex: Arc<std::sync::Mutex<()>>,
-    exiting: bool,
 }
 
 impl<'window> State<'window> {
@@ -76,7 +75,7 @@ impl<'window> State<'window> {
 
         let window = Arc::new(window);
 
-        let mut params = parameters::Parameters::builder()
+        let params = parameters::Parameters::builder()
             .shader_parameters(
                 parameters::ShaderParameters::builder()
                     .canvas_width(size.width)
@@ -84,8 +83,6 @@ impl<'window> State<'window> {
                     .build(),
             )
             .build();
-
-        // params.shader_parameters.randomize();
 
         // Context for all other wgpu objects.
         let instance = Instance::new(InstanceDescriptor {
@@ -112,7 +109,6 @@ impl<'window> State<'window> {
             pipelines,
             window,
             gpu_mutex: Arc::new(std::sync::Mutex::new(())),
-            exiting: false,
         }
     }
 
@@ -241,10 +237,6 @@ impl<'window> State<'window> {
 
         Ok(())
     }
-
-    fn exit(&mut self) {
-        self.exiting = true;
-    }
 }
 
 fn configure_surface(
@@ -291,21 +283,19 @@ pub async fn run() {
     let state = Arc::new(State::new(window).await);
 
     // Spawn thread to drive the simulation forward by dispatching GPU commands at e.g. 60 FPS
-    let state_tick = Arc::clone(&state);
-    let ticker = tokio::spawn(async move {
-        loop {
-            if state_tick.exiting {
-                break;
+    let ticker = {
+        let state_tick = Arc::clone(&state);
+        tokio::spawn(async move {
+            loop {
+                state_tick.update();
+
+                tokio::time::sleep(std::time::Duration::from_nanos(
+                    1_000_000_000 / state_tick.params.target_ticks_per_second as u64,
+                ))
+                .await;
             }
-
-            state_tick.update();
-
-            tokio::time::sleep(std::time::Duration::from_nanos(
-                1_000_000_000 / state_tick.params.target_ticks_per_second as u64,
-            ))
-            .await;
-        }
-    });
+        })
+    };
 
     event_loop
         .run(move |event, elwt| {
@@ -364,7 +354,7 @@ pub async fn run() {
                     }
                 }
                 Event::LoopExiting => {
-                    // state.exit();
+                    // tx.send(true).await.unwrap();
                     println!("The event loop is exiting; stopping");
                 }
                 _ => (),
@@ -373,6 +363,4 @@ pub async fn run() {
         .unwrap_or_else(|e| {
             eprintln!("An error occurred: {}", e);
         });
-
-    ticker.await.unwrap();
 }
